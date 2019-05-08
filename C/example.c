@@ -31,6 +31,7 @@
 #include <sys/random.h>
 #include <unistd.h>
 
+#include <openssl/asn1t.h>
 #include <openssl/bn.h>
 #include <openssl/err.h>
 #include <openssl/sha.h>
@@ -39,6 +40,18 @@
 #include "random.h"
 #include "tpm_crypt.h"
 #include "tpmd_socket.h"
+
+typedef struct ecdsa_signature {
+	ASN1_INTEGER *r;
+	ASN1_INTEGER *s;
+} ECDSA_SIGNATURE;
+
+ASN1_SEQUENCE(ECDSA_SIGNATURE) = {
+	ASN1_SIMPLE(ECDSA_SIGNATURE, r, ASN1_INTEGER),
+	ASN1_SIMPLE(ECDSA_SIGNATURE, s, ASN1_INTEGER),
+} ASN1_SEQUENCE_END(ECDSA_SIGNATURE);
+
+IMPLEMENT_ASN1_FUNCTIONS(ECDSA_SIGNATURE);
 
 static const unsigned char tpm_root_mod[128] = {
 	0x9F,0x7C,0xE4,0x47,0xC9,0xB4,0xF4,0x23,0x26,0xCE,0xB3,0xFE,0xDA,0xC9,0x55,0x60,
@@ -128,7 +141,11 @@ static bool verify_signature_v2(const struct buffer *ica,
                                 const struct buffer *signature,
                                 const struct buffer *plaintext)
 {
-	const unsigned char *ptr, *r, *s;
+	const unsigned char *ptr;
+	unsigned char *buf = NULL;
+	int size;
+	ECDSA_SIGNATURE *sig;
+	BIGNUM *r, *s;
 	EVP_MD_CTX *mdctx;
 	EVP_PKEY *pkey;
 	X509 *cert;
@@ -159,56 +176,40 @@ static bool verify_signature_v2(const struct buffer *ica,
 	if (cert == NULL)
 		return false;
 
-	r = &signature->data[0];
-	s = &signature->data[32];
-
 	pkey = X509_get_pubkey(cert);
 	X509_free(cert);
 
-	unsigned char buf[1024];
-	unsigned int pos = 0;
-	buf[pos++] = 0x30;
-	buf[pos++] = (2 + 32) * 2 + (r[0] >> 7) + (s[0] >> 7);
+	r = BN_bin2bn(&signature->data[0], 32, NULL);
+	s = BN_bin2bn(&signature->data[32], 32, NULL);
 
-	buf[pos++] = 0x02;
-	if (r[0] >= 0x80) {
-		buf[pos++] = 33;
-		buf[pos++] = 0;
-	} else {
-		buf[pos++] = 32;
-	}
-
-	memcpy(&buf[pos], r, 32);
-	pos += 32;
-
-	buf[pos++] = 0x02;
-	if (s[0] >= 0x80) {
-		buf[pos++] = 33;
-		buf[pos++] = 0;
-	} else {
-		buf[pos++] = 32;
-	}
-
-	memcpy(&buf[pos], s, 32);
-	pos += 32;
+	sig = ECDSA_SIGNATURE_new();
+	sig->r = BN_to_ASN1_INTEGER(r, NULL);
+	sig->s = BN_to_ASN1_INTEGER(s, NULL);
+	size = i2d_ECDSA_SIGNATURE(sig, &buf);
 
 	mdctx = EVP_MD_CTX_create();
 	if (mdctx == NULL)
 		goto free_pkey;
 
-	ret = EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, pkey);
-	if (ret != 1)
-		goto destroy_ctx;
+	if (buf != NULL && size > 0) {
+		ret = EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, pkey);
+		if (ret != 1)
+			goto destroy_ctx;
 
-	ret = EVP_DigestVerifyUpdate(mdctx, plaintext->data, plaintext->size);
-	if (ret != 1)
-		goto destroy_ctx;
+		ret = EVP_DigestVerifyUpdate(mdctx, plaintext->data, plaintext->size);
+		if (ret != 1)
+			goto destroy_ctx;
 
-	ret = EVP_DigestVerifyFinal(mdctx, buf, pos);
+		ret = EVP_DigestVerifyFinal(mdctx, buf, size);
+	}
 
 destroy_ctx:
 	EVP_MD_CTX_destroy(mdctx);
 free_pkey:
+	free(buf);
+	ECDSA_SIGNATURE_free(sig);
+	BN_free(s);
+	BN_free(r);
 	EVP_PKEY_free(pkey);
 
 	return ret == 1;
