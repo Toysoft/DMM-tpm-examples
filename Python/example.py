@@ -146,7 +146,7 @@ class TPMv2():
     def verify_signature(sig, data, pubkey):
         from cryptography.hazmat.primitives.hashes import SHA256
         from cryptography.hazmat.primitives.asymmetric.ec import ECDSA
-        from pyasn1.codec.ber.encoder import encode
+        from pyasn1.codec.der.encoder import encode
         from pyasn1.type.univ import Integer, SequenceOf
 
         if len(sig) != 64:
